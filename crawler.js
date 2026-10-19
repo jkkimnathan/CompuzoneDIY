@@ -311,6 +311,26 @@ async function extractProductsOnPage(page, mediumDivNo, bigDivNo) {
   }, { divNo: mediumDivNo, bigDiv: bigDivNo });
 }
 
+// 리스트 상단 "카테고리명 (N)"의 N을 읽는다. 값이 JS로 늦게 채워지므로 잠시 대기한다.
+async function readTotalCount(page) {
+  const parse = (t) => {
+    const n = Number(String(t || '').replace(/[^\d]/g, ''));
+    return Number.isFinite(n) ? n : 0;
+  };
+  for (let i = 0; i < 10; i++) {
+    const n = parse(await page.$eval('#page_total_cnt', (el) => el.innerText).catch(() => ''));
+    if (n > 0) return n;
+    await randomDelay(500, 800);
+  }
+  // 폴백: 모든 h2 중 "(숫자)" 패턴이 있는 것
+  const h2Texts = await page.$$eval('h2', (els) => els.map((el) => el.innerText)).catch(() => []);
+  for (const t of h2Texts) {
+    const m = t.match(/\((\d[\d,]*)\)/);
+    if (m && parse(m[1]) > 0) return parse(m[1]);
+  }
+  return 0;
+}
+
 async function scrapeProductListPages(page, brand) {
   const ITEMS_PER_PAGE = 60;
 
@@ -338,11 +358,16 @@ async function scrapeProductListPages(page, brand) {
       continue;
     }
 
-    // 총 상품 수 추출 (h2 텍스트: "그래픽카드 (725)")
-    const totalCountText = await page.$eval('h2', (el) => el.innerText).catch(() => '');
-    const totalMatch = totalCountText.match(/\((\d[\d,]*)\)/);
-    const expectedTotal = totalMatch ? Number(totalMatch[1].replace(/,/g, '')) : 0;
-    const totalPages = expectedTotal > 0 ? Math.ceil(expectedTotal / ITEMS_PER_PAGE) : 1;
+    // 총 상품 수 추출: "메인보드 (885)"의 숫자는 span#page_total_cnt에 JS로 채워진다.
+    // ★ 첫 번째 h2만 보면 안 된다 – 타임딜 카운트다운 등 다른 h2가 앞에 붙는 경우가 있어
+    //   (2026-10 메인보드) 총 상품 수를 못 읽고 1페이지(60개)만 수집되는 문제가 있었다.
+    const expectedTotal = await readTotalCount(page);
+    let totalPages = expectedTotal > 0 ? Math.ceil(expectedTotal / ITEMS_PER_PAGE) : 0;
+    if (totalPages === 0) {
+      // 폴백: 페이지네이션 링크 개수
+      totalPages = await page.$$eval('div.page_area a.num', (links) => links.length).catch(() => 0) || 1;
+      console.log(`  ⚠ [${brand.id}] 총 상품 수 확인 불가 – 페이지 링크 기준 ${totalPages}페이지로 진행`);
+    }
     console.log(`  📊 총 상품 수: ${expectedTotal || '확인 불가'}, 총 페이지: ${totalPages}`);
 
     // BigDivNo, MediumDivNo 추출 (URL에서)
@@ -632,10 +657,11 @@ async function saveToFirestore(products, brandId, todayStr) {
   console.log(`  💾 [${brandId}] Firestore 저장 시작 (${products.length}건)...`);
 
   // 날짜 마스터 문서 업데이트
+  // ({brand}_count는 아래 batch가 모두 끝난 뒤 기록한다 – 재시도 실행이 "오늘 완료된 브랜드"를
+  //  판단하는 기준이므로, 저장 도중 실패한 브랜드가 완료로 보이면 안 된다.)
   const masterRef = db.collection('compuzone_prices').doc(todayStr);
   await masterRef.set({
     date: todayStr,
-    [`${brandId}_count`]: products.length,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   }, { merge: true });
 
@@ -663,6 +689,25 @@ async function saveToFirestore(products, brandId, todayStr) {
     await batch.commit();
     console.log(`    ✅ ${start + 1}~${start + chunk.length}번째 저장 완료`);
   }
+
+  await masterRef.set({
+    [`${brandId}_count`]: products.length,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+}
+
+// 오늘 이미 저장이 끝난 브랜드 목록 (재시도 스케줄에서 빠진 브랜드만 다시 수집하기 위함)
+async function getCompletedBrands(todayStr) {
+  try {
+    const snap = await db.collection('compuzone_prices').doc(todayStr).get();
+    const data = snap.exists ? snap.data() : {};
+    return new Set(
+      BRANDS.map((b) => b.id).filter((id) => Number(data[`${id}_count`] || 0) > 0)
+    );
+  } catch (e) {
+    console.log(`  ⚠ 오늘 완료 브랜드 조회 실패 – 전체를 대상으로 진행: ${e.message}`);
+    return new Set();
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -689,6 +734,24 @@ async function trackCompuzone() {
     process.exit(1);
   }
 
+  const todayStr = getTodayDateString();
+
+  // 재시도 모드(RESUME_TODAY=true, 하루 여러 번 도는 schedule 용):
+  // 컴퓨존이 GitHub Actions IP에서 접속 불가인 날이 잦아, 같은 날 여러 번 실행하되
+  // 오늘 이미 저장이 끝난 브랜드는 건너뛰고 빠진 브랜드만 수집한다.
+  // (특정 브랜드를 지정한 수동 실행은 항상 다시 수집)
+  const resumeToday = !targetBrand && (process.env.RESUME_TODAY || '').trim() === 'true';
+  if (resumeToday) {
+    const completed = await getCompletedBrands(todayStr);
+    const before = activeBrands.length;
+    activeBrands = activeBrands.filter((b) => !completed.has(b.id));
+    console.log(`🔁 재시도 모드 (${todayStr}): 오늘 완료 ${completed.size}개 [${[...completed].join(', ')}] → 남은 ${activeBrands.length}/${before}개`);
+    if (activeBrands.length === 0) {
+      console.log('✅ 오늘 모든 브랜드 수집이 이미 끝났습니다. 종료합니다.');
+      process.exit(0);
+    }
+  }
+
   const modeLabel = targetBrand ? `[${targetBrand}] 단일 크롤링` : '전체 크롤링';
   await updateProgress('running', 0, `${modeLabel} 시작 중...`);
 
@@ -704,7 +767,7 @@ async function trackCompuzone() {
   });
   const page = await context.newPage();
   await applyStealthScripts(page);
-  const todayStr = getTodayDateString();
+  const failedBrands = [];
 
   try {
     // 로그인이 필요한 브랜드가 있는지 확인하고 미리 로그인
@@ -723,6 +786,7 @@ async function trackCompuzone() {
       // 로그인 필요한데 로그인 안 된 경우 건너뛰기
       if (brand.requiresLogin && !isLoggedIn) {
         console.log(`  ⚠ [${brand.id}] 로그인 필요 – 건너뜁니다.`);
+        failedBrands.push(brand.id);
         continue;
       }
 
@@ -743,6 +807,7 @@ async function trackCompuzone() {
 
         if (products.length === 0) {
           console.log(`  ⚠ [${brand.id}] 상품 0개 – 건너뜁니다.`);
+          failedBrands.push(brand.id);
           continue;
         }
 
@@ -772,15 +837,25 @@ async function trackCompuzone() {
         // 한 브랜드에서 예기치 못한 오류가 나도 전체 크롤링을 멈추지 않고
         // 이 브랜드만 건너뛴 뒤 다음 브랜드로 계속 진행한다.
         console.log(`  ❌ [${brand.id}] 수집 중 오류 – 이 브랜드만 건너뛰고 계속 진행: ${brandErr.message}`);
+        failedBrands.push(brand.id);
         continue;
       }
     }
 
-    await updateProgress('done', 100, `${modeLabel} 완료 (${todayStr})`);
+    if (failedBrands.length > 0) {
+      // 실패를 Actions에서 빨간불로 보이게 하고(예전엔 0건 수집도 '성공'으로 표시됨),
+      // 다음 재시도 스케줄이 빠진 브랜드만 다시 수집한다.
+      const msg = `${modeLabel} 일부 실패 (${todayStr}): ${failedBrands.join(', ')}`;
+      await updateProgress('error', 100, msg);
+      console.log(`\n  ❌ ${msg}`);
+      process.exitCode = 1;
+    } else {
+      await updateProgress('done', 100, `${modeLabel} 완료 (${todayStr})`);
 
-    console.log(`\n${'═'.repeat(60)}`);
-    console.log(`  ✅ ${modeLabel} 완료 (${todayStr})`);
-    console.log(`${'═'.repeat(60)}`);
+      console.log(`\n${'═'.repeat(60)}`);
+      console.log(`  ✅ ${modeLabel} 완료 (${todayStr})`);
+      console.log(`${'═'.repeat(60)}`);
+    }
 
   } catch (error) {
     await updateProgress('error', 0, `오류 발생: ${error.message}`);
