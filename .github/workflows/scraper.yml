@@ -11,11 +11,6 @@ on:
     - cron: '0 1 * * *'    # KST 10:00
     - cron: '0 5 * * *'    # KST 14:00
     - cron: '0 9 * * *'    # KST 18:00
-
-# 지연된 실행끼리 겹쳐 같은 브랜드를 동시에 수집하지 않도록 순차 실행
-concurrency:
-  group: compuzone-scraper
-  cancel-in-progress: false
   workflow_dispatch: # 수동 실행 버튼
     inputs:
       brand:
@@ -23,6 +18,11 @@ concurrency:
         required: false
         default: ''
         type: string
+
+# 지연된 실행끼리 겹쳐 같은 브랜드를 동시에 수집하지 않도록 순차 실행
+concurrency:
+  group: compuzone-scraper
+  cancel-in-progress: false
 
 jobs:
   scrape-and-save:
