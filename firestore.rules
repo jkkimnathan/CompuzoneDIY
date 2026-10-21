@@ -1,0 +1,30 @@
+rules_version = '2';
+
+// 컴퓨존 가격 대시보드 Firestore 보안 규칙
+// - 대시보드(웹, 로그인 없음)는 읽기만 한다 → 필요한 경로만 공개 읽기 허용
+// - 저장은 크롤러/요약 채우기(GitHub Actions, firebase-admin)만 하는데,
+//   관리자 SDK는 이 규칙을 거치지 않으므로 웹에서의 쓰기는 전부 막는다.
+// 적용: Firebase 콘솔 > Firestore Database > 규칙 탭에 이 내용을 붙여넣고 "게시"
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 날짜 문서 + 날짜별 브랜드 상품 문서
+    match /compuzone_prices/{document=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // 부품 카테고리 하루 요약 문서
+    match /compuzone_summary/{document=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // 크롤링 진행률
+    match /crawl_status/{document=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // 그 밖의 경로는 읽기·쓰기 모두 차단 (규칙에 없는 경로는 기본 차단)
+  }
+}
