@@ -1,8 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import { fetchDayItems } from '@/lib/dailySummary';
 
 export interface ProductPriceRow {
     productNo: string;
@@ -36,11 +35,10 @@ export function useMultiDateProducts(brandId: string, availableDates: string[]) 
 
             const promises = recentDates.map(async (date) => {
                 try {
-                    const colRef = collection(db, 'compuzone_prices', date, brandId);
-                    const snapshot = await getDocs(colRef);
-                    snapshot.docs.forEach((doc) => {
-                        const data = doc.data();
-                        const productNo = data.productNo || doc.id;
+                    // 하루 요약 문서 1건 (없으면 그날 상품 문서 전체)
+                    const items = await fetchDayItems(brandId, date);
+                    items.forEach((data) => {
+                        const productNo = data.productNo;
                         // 딜러가: 크롤러가 판매가/딜러가/쿠폰가 중 최저값으로 저장한 discountPrice
                         const price = Number(data.discountPrice || data.originalPrice || 0);
                         // 판매가: 신규 필드 sellPrice, 없으면(과거 데이터) originalPrice로 대체

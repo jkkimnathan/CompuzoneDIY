@@ -1,8 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import { fetchDayItems } from '@/lib/dailySummary';
 
 const PRODUCT_LIST_BRANDS = ['CPU', '그래픽카드', '메인보드', 'Microsoft'];
 
@@ -46,12 +45,11 @@ export function useSummaryProducts(keywords: string[], availableDates: string[])
             for (const brandId of PRODUCT_LIST_BRANDS) {
                 for (const date of recentDates) {
                     try {
-                        const colRef = collection(db, 'compuzone_prices', date, brandId);
-                        const snapshot = await getDocs(colRef);
-                        snapshot.docs.forEach((doc) => {
-                            const data = doc.data();
-                            const name = (data.name || '') as string;
-                            const productNo = data.productNo || doc.id;
+                        // 하루 요약 문서 1건 (없으면 그날 상품 문서 전체)
+                        const items = await fetchDayItems(brandId, date);
+                        items.forEach((data) => {
+                            const name = data.name || '';
+                            const productNo = data.productNo;
                             const price = Number(data.discountPrice || data.originalPrice || 0);
                             if (!name || price === 0) return;
 

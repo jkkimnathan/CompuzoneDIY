@@ -1,0 +1,42 @@
+name: Backfill Daily Summary
+
+on:
+  schedule:
+    # 하루 1번, Firestore 일일 한도가 초기화된 직후(태평양 자정 = KST 16:00/17:00) 실행.
+    # 과거 날짜 요약 문서를 MAX_READS만큼씩 채우고, 다 채운 뒤에는 확인만 한다.
+    - cron: '30 8 * * *'   # KST 17:30
+  workflow_dispatch:
+    inputs:
+      max_reads:
+        description: '이번 실행에서 쓸 최대 읽기 수'
+        required: false
+        default: '15000'
+        type: string
+
+# 크롤러와 동시에 돌지 않도록 같은 그룹으로 순차 실행
+concurrency:
+  group: compuzone-scraper
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install firebase-admin
+
+      - name: Run Backfill
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          MAX_READS: ${{ github.event.inputs.max_reads || '15000' }}
+        run: node backfill-summary.js

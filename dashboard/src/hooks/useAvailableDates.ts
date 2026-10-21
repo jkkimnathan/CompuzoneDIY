@@ -24,7 +24,10 @@ export function useAvailableDates() {
                     .filter((id) => /^\d{4}-\d{2}-\d{2}$/.test(id)) // YYYY-MM-DD 형식만
                     .sort((a, b) => b.localeCompare(a)); // 최신순 정렬
 
-                setDates(dateList);
+                // 크롤러가 날짜 문서를 고칠 때마다(updatedAt 등) 스냅샷이 다시 오는데,
+                // 날짜 목록이 그대로면 같은 배열을 유지해야 이 목록을 쓰는 화면이
+                // 30일치를 처음부터 다시 읽지 않는다.
+                setDates((prev) => (prev.join(',') === dateList.join(',') ? prev : dateList));
                 setLatestDate(dateList[0] || '');
                 setLoading(false);
             },

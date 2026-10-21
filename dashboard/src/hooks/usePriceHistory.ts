@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 
 interface PricePoint {
     date: string;
@@ -38,11 +38,10 @@ export function usePriceHistory(
 
             const promises = recentDates.map(async (date) => {
                 try {
-                    const colRef = collection(db, 'compuzone_prices', date, brandId);
-                    const snapshot = await getDocs(colRef);
-                    const doc = snapshot.docs.find((d) => d.id === productNo);
-                    if (doc) {
-                        const data = doc.data();
+                    // 그날 이 상품 문서 1건만 읽는다 (예전엔 그날 브랜드 전체를 읽고 골라냄)
+                    const snap = await getDoc(doc(db, 'compuzone_prices', date, brandId, productNo));
+                    if (snap.exists()) {
+                        const data = snap.data();
                         const price = Number(data?.discountPrice ?? data?.originalPrice ?? 0);
                         if (price > 0) {
                             results.push({ date, price });
