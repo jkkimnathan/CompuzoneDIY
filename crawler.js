@@ -1,5 +1,6 @@
 const { chromium } = require('playwright');
 const admin = require('firebase-admin');
+const { summaryRef, toSummaryItem, buildSummary } = require('./daily-summary');
 
 // ─────────────────────────────────────────────
 // 0. 봇 탐지 우회 유틸
@@ -601,8 +602,8 @@ async function scrapeDetailComponents(page, products, brandId, brandIdx, totalBr
     const itemProgress = ((i + 1) / products.length) * brandWeight;
     const overallPercent = Math.round((brandIdx * brandWeight) + itemProgress);
 
-    // 5건마다 Firestore 진행률 업데이트 (너무 빈번한 업데이트 방지)
-    if (i % 5 === 0 || i === products.length - 1) {
+    // 10건마다 Firestore 진행률 업데이트 (쓰기 + 열려 있는 대시보드의 읽기 절약)
+    if (i % 10 === 0 || i === products.length - 1) {
       await updateProgress(
         'running',
         Math.min(overallPercent, 99),
@@ -653,7 +654,7 @@ async function scrapeDetailComponents(page, products, brandId, brandIdx, totalBr
 // 6. Firestore 저장 (브랜드별 서브컬렉션 분리)
 //    구조: compuzone_prices/{날짜}/{브랜드명}/{ProductNo}
 // ─────────────────────────────────────────────
-async function saveToFirestore(products, brandId, todayStr) {
+async function saveToFirestore(products, brandId, todayStr, brandType) {
   console.log(`  💾 [${brandId}] Firestore 저장 시작 (${products.length}건)...`);
 
   // 날짜 마스터 문서 업데이트
@@ -690,10 +691,36 @@ async function saveToFirestore(products, brandId, todayStr) {
     console.log(`    ✅ ${start + 1}~${start + chunk.length}번째 저장 완료`);
   }
 
+  // 부품 카테고리는 하루 요약 문서도 저장 (대시보드 30일 가격표가 이 문서만 읽음)
+  if (brandType === 'product_list') {
+    await saveDailySummary(products, brandId, todayStr);
+  }
+
   await masterRef.set({
     [`${brandId}_count`]: products.length,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   }, { merge: true });
+}
+
+// 하루 요약 문서 저장. 같은 날 다시 수집하면 상품 문서처럼 합쳐서(merge) 저장한다
+// – 이번에 빠진 상품도 그날 이미 저장된 값은 유지 (기존 상품 문서 merge:true와 같은 결과).
+async function saveDailySummary(products, brandId, todayStr) {
+  const ref = summaryRef(db, brandId, todayStr);
+  const byNo = new Map();
+  try {
+    const snap = await ref.get();
+    if (snap.exists) {
+      for (const it of snap.data().items || []) byNo.set(String(it.productNo), it);
+    }
+  } catch (e) {
+    console.log(`  ⚠ [${brandId}] 기존 요약 조회 실패 – 이번 수집분만으로 저장: ${e.message}`);
+  }
+  for (const p of products) byNo.set(String(p.productNo), toSummaryItem(p));
+
+  const doc = buildSummary(brandId, todayStr, [...byNo.values()]);
+  if (!doc) return;
+  await ref.set({ ...doc, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  console.log(`    ✅ 하루 요약 문서 저장 (${doc.count}건)`);
 }
 
 // 오늘 이미 저장이 끝난 브랜드 목록 (재시도 스케줄에서 빠진 브랜드만 다시 수집하기 위함)
@@ -817,7 +844,7 @@ async function trackCompuzone() {
         }
 
         // 3단계: Firestore 저장
-        await saveToFirestore(products, brand.id, todayStr);
+        await saveToFirestore(products, brand.id, todayStr, brand.type);
 
         console.log(`\n  🏁 [${brand.id}] 완료! ${products.length}건 저장됨.`);
 
