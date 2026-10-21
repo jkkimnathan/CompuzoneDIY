@@ -29,12 +29,13 @@ async function main() {
   let reads = 0;
 
   // 대시보드와 같은 기준: 최신 날짜 문서 BACKFILL_DAYS개
-  const datesSnap = await db.collection('compuzone_prices')
-    .orderBy(admin.firestore.FieldPath.documentId(), 'desc')
-    .limit(BACKFILL_DAYS)
-    .get();
+  // (문서 ID 내림차순 정렬은 별도 색인이 필요해서, 날짜 문서 ~200개를 다 읽고 여기서 정렬)
+  const datesSnap = await db.collection('compuzone_prices').get();
   reads += Math.max(datesSnap.size, 1);
-  const dateDocs = datesSnap.docs.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.id));
+  const dateDocs = datesSnap.docs
+    .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.id))
+    .sort((a, b) => b.id.localeCompare(a.id))
+    .slice(0, BACKFILL_DAYS);
   console.log(`📅 대상 날짜 ${dateDocs.length}개 (${dateDocs.at(-1)?.id} ~ ${dateDocs[0]?.id}), 읽기 한도 ${MAX_READS}`);
 
   let created = 0;
